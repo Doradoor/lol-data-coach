@@ -1,0 +1,12 @@
+# Claves de API: nunca subir
+.env
+
+# Entorno virtual y caché de Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Datos locales (base de datos, partidas descargadas)
+data/
