@@ -2,6 +2,7 @@ import logging
 import time
 
 from sqlalchemy import select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models import Rank, User, engine
@@ -40,8 +41,8 @@ def register_user(game_name: str, tagline: str, platform: str = "la1", refresh_r
     return puuid
 
 
-def get_current_rank(puuid: str, queue_type: str) -> Rank | None:
-    with Session(engine) as session:
+def get_current_rank(puuid: str, queue_type: str, db: Engine = engine) -> Rank | None:
+    with Session(db) as session:
         stmt = (
             select(Rank)
             .where(Rank.puuid == puuid, Rank.queue_type == queue_type)
@@ -52,10 +53,14 @@ def get_current_rank(puuid: str, queue_type: str) -> Rank | None:
 
 
 def save_current_rank(puuid: str, platform: str = "la1") -> None:
-    rank_entries = obtain_rank(puuid, platform)
+    store_rank(puuid, obtain_rank(puuid, platform))
+
+
+def store_rank(puuid: str, rank_entries: list[dict], db: Engine = engine) -> None:
+    """Guarda en `db` las entradas de rank que devolvió Riot."""
     now = int(time.time())
 
-    with Session(engine) as session:
+    with Session(db) as session:
         session.add_all(
             Rank(
                 puuid=puuid,

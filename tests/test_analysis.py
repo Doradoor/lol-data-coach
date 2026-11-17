@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from analysis import build_features, features_for, vs_rival, TEAM_FEATURES, RIVAL_FEATURES
+from analysis import MIN_ROWS, build_features, features_for, fit_role, vs_rival, TEAM_FEATURES, RIVAL_FEATURES
 
 
 def player(match, team, pos, win, k=2, d=2, a=2, dmg=1000, taken=1000, vision=10, heals=0, cs=100, kp=0.5):
@@ -53,3 +53,34 @@ def test_features_for_heal_only_support():
     assert "heal_share" not in features_for("TOP", TEAM_FEATURES, drop_kda=False)
     assert "heal_share" in features_for("UTILITY", TEAM_FEATURES, drop_kda=False)
     assert "log_kda" not in features_for("MIDDLE", RIVAL_FEATURES, drop_kda=True)
+
+
+def test_features_for_exclude():
+    feats = features_for("MIDDLE", RIVAL_FEATURES, drop_kda=False,
+                         exclude=frozenset({"log_kda", "kill_participation"}))
+    assert "log_kda" not in feats and "kill_participation" not in feats
+    assert "cs_per_min" in feats
+
+
+def synthetic_role(n_matches: int) -> pd.DataFrame:
+    """n_matches partidas de Mid donde el ganador farmea un poco más (con ruido)."""
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(n_matches):
+        for win in (1, 0):
+            rows.append({"match_id": f"M{i}", "team_position": "MIDDLE", "win": win,
+                         "cs_per_min": 7 + win + rng.normal(0, 1), "vision_per_min": rng.normal(1, 0.2)})
+    return pd.DataFrame(rows)
+
+
+def test_fit_role_returns_none_with_few_rows():
+    df = synthetic_role(MIN_ROWS // 2 - 1)  # 2 filas por partida → menos de MIN_ROWS
+    assert fit_role(df, "MIDDLE", ["cs_per_min"]) is None
+
+
+def test_fit_role_result_shape():
+    result = fit_role(synthetic_role(60), "MIDDLE", ["cs_per_min", "vision_per_min"])
+    assert result["rows"] == 120
+    assert 0 <= result["accuracy"] <= 1 and result["accuracy_std"] >= 0
+    assert list(result["coefs"]) == ["cs_per_min", "vision_per_min"]
+    assert result["coefs"]["cs_per_min"] > 0  # farmear más → ganar

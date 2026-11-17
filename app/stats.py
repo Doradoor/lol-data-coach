@@ -2,6 +2,7 @@ import logging
 from collections import Counter, defaultdict
 
 from sqlalchemy import select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models import Match, Participant, engine
@@ -45,11 +46,15 @@ def find_rival(me: Participant, match_players: list[Participant]) -> Participant
     )
 
 
-def get_my_matchups(puuid: str) -> list[dict]:
-    """Una fila por partida válida, ordenadas de la más antigua a la más reciente."""
+def get_my_matchups(puuid: str, db: Engine = engine) -> list[dict]:
+    """Una fila por partida válida, ordenadas de la más antigua a la más reciente.
+
+    `db` es la base de donde leer: data/lol.db por defecto, o una base en memoria
+    (models.create_memory_engine) para consultas temporales.
+    """
     matchups = []
 
-    with Session(engine) as session:
+    with Session(db) as session:
         stmt = (
             select(Participant, Match)
             .join(Match, Participant.match_id == Match.match_id)

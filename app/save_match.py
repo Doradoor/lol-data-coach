@@ -2,6 +2,7 @@ import json
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models import DATA_DIR, Match, Participant, engine
@@ -9,17 +10,17 @@ from models import DATA_DIR, Match, Participant, engine
 log = logging.getLogger(__name__)
 
 
-def existing_match_ids(match_ids: list[str]) -> set[str]:
+def existing_match_ids(match_ids: list[str], db: Engine = engine) -> set[str]:
     """Devuelve cuáles de estos match_id ya están en la base (una sola consulta)."""
     if not match_ids:
         return set()
-    with Session(engine) as session:
+    with Session(db) as session:
         stmt = select(Match.match_id).where(Match.match_id.in_(match_ids))
         return set(session.scalars(stmt))
 
 
-def save_match(data: dict) -> bool:
-    """Guarda la partida. Devuelve False si ya existía."""
+def save_match(data: dict, db: Engine = engine) -> bool:
+    """Guarda la partida en `db` (por defecto, data/lol.db). Devuelve False si ya existía."""
     info = data["info"]
     match_id = data["metadata"]["matchId"]
 
@@ -45,7 +46,7 @@ def save_match(data: dict) -> bool:
         for player in info["participants"]
     ]
 
-    with Session(engine) as session:
+    with Session(db) as session:
         if session.get(Match, match_id) is not None:
             log.info("La partida %s ya está guardada, la salto", match_id)
             return False

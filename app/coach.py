@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
 
-from models import ROOT_DIR
+from sqlalchemy.engine import Engine
+
+from models import ROOT_DIR, engine
 from stats import calculate_champion_stats, calculate_stats, get_my_matchups, main_roles, overall_winrate
 from users import get_current_rank
 
@@ -42,13 +44,19 @@ def pct(v) -> str:
     return "n/d" if v is None else f"{v * 100:.0f}%"
 
 
-def build_prompt(game_name: str, tagline: str, puuid: str, matchups: list[dict] | None = None) -> str:
+def build_prompt(
+    game_name: str,
+    tagline: str,
+    puuid: str,
+    matchups: list[dict] | None = None,
+    db: Engine = engine,
+) -> str:
     if matchups is None:
-        matchups = get_my_matchups(puuid)
+        matchups = get_my_matchups(puuid, db)
 
     lines = [f"Jugador: {game_name}#{tagline}"]
 
-    rank = get_current_rank(puuid, "RANKED_SOLO_5x5")
+    rank = get_current_rank(puuid, "RANKED_SOLO_5x5", db)
     if rank:
         lines.append(f"SoloQ: {rank.tier} {rank.rank_division}, {rank.league_points} LP "
                      f"({rank.wins}V/{rank.losses}D en la temporada)")

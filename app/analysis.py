@@ -15,6 +15,7 @@ from sklearn.model_selection import GroupKFold, cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 from models import engine
 from stats import MIN_GAME_SECONDS
@@ -58,7 +59,7 @@ HEAL_ROLES = {"UTILITY"}
 MIN_ROWS = 50
 
 
-def load_data() -> pd.DataFrame:
+def load_data(db: Engine = engine) -> pd.DataFrame:
     """Trae a los 10 jugadores de cada partida válida de Grieta del Invocador.
 
     Usa el mismo filtro que stats.py, para que los dos análisis vean las mismas partidas.
@@ -71,7 +72,7 @@ def load_data() -> pd.DataFrame:
           AND m.game_duration > :min_duration
           AND m.end_game_result = 'GameComplete'
     """)
-    return pd.read_sql(query, engine, params={"min_duration": MIN_GAME_SECONDS})
+    return pd.read_sql(query, db, params={"min_duration": MIN_GAME_SECONDS})
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -122,20 +123,28 @@ def vs_rival(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return df
 
 
-def features_for(role: str, base: list[str], drop_kda: bool) -> list[str]:
+def features_for(role: str, base: list[str], drop_kda: bool, exclude: frozenset[str] = frozenset()) -> list[str]:
+    """Métricas a usar para un rol: sin curación fuera de Support y sin las excluidas."""
     return [
         f for f in base
         if not (drop_kda and f == "log_kda")
+        and f not in exclude
         and not (f in HEAL_FEATURES and role not in HEAL_ROLES)
     ]
 
 
-def analyze_role(df: pd.DataFrame, role: str, features: list[str], paired: bool) -> None:
-    """Entrena una regresión logística por rol e imprime qué métricas pesan más."""
+def fit_role(df: pd.DataFrame, role: str, features: list[str], paired: bool = False) -> dict | None:
+    """Entrena una regresión logística para un rol y devuelve sus resultados.
+
+    Devuelve None si el rol no tiene al menos MIN_ROWS filas. Si no, un dict con:
+      rows          filas usadas
+      accuracy      exactitud media en validación cruzada (0-1)
+      accuracy_std  desviación de la exactitud entre los 5 grupos
+      coefs         {métrica: coeficiente}, en el orden de `features`
+    """
     d = df[df["team_position"] == role].dropna(subset=features)
     if len(d) < MIN_ROWS:
-        print(f"{role}: solo {len(d)} filas, muestra insuficiente\n")
-        return
+        return None
 
     # En modo vs rival los datos son simétricos (cada fila tiene su espejo con el signo
     # cambiado y el resultado opuesto), así que el intercepto no tiene sentido.
@@ -148,8 +157,25 @@ def analyze_role(df: pd.DataFrame, role: str, features: list[str], paired: bool)
     model.fit(d[features], d["win"])
     coefs = model.named_steps["logisticregression"].coef_[0]
 
-    print(f"=== {role} ({len(d)} filas) | exactitud: {scores.mean():.0%} (±{scores.std():.0%}) ===")
-    for name, c in sorted(zip(features, coefs), key=lambda x: abs(x[1]), reverse=True):
+    return {
+        "rows": len(d),
+        "accuracy": float(scores.mean()),
+        "accuracy_std": float(scores.std()),
+        "coefs": {name: float(c) for name, c in zip(features, coefs)},
+    }
+
+
+def analyze_role(df: pd.DataFrame, role: str, features: list[str], paired: bool) -> None:
+    """Entrena el modelo de un rol e imprime qué métricas pesan más."""
+    result = fit_role(df, role, features, paired)
+    if result is None:
+        rows = len(df[df["team_position"] == role].dropna(subset=features))
+        print(f"{role}: solo {rows} filas, muestra insuficiente\n")
+        return
+
+    print(f"=== {role} ({result['rows']} filas) | exactitud: "
+          f"{result['accuracy']:.0%} (±{result['accuracy_std']:.0%}) ===")
+    for name, c in sorted(result["coefs"].items(), key=lambda x: abs(x[1]), reverse=True):
         print(f"  {name:22s} {c:+.2f}")
     print()
 

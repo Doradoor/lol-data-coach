@@ -1,7 +1,11 @@
 import json
 import logging
 import os
+import threading
 import time
+from collections import deque
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import quote
 
@@ -32,6 +36,52 @@ class RiotAPIError(RuntimeError):
     """Error de la API de Riot con un mensaje legible para mostrar al usuario."""
 
 
+class RateLimiter:
+    """Limita las llamadas con ventanas deslizantes, p. ej. [(20, 1), (100, 120)] =
+    máximo 20 llamadas en cualquier segundo y 100 en cualquier ventana de 2 minutos.
+
+    Antes de cada llamada se ejecuta acquire(): si alguna ventana está llena, espera
+    justo lo necesario hasta que salga la llamada más antigua. Así no se esperan
+    1.2 s fijos entre llamadas: las primeras van de inmediato. Es seguro usarlo
+    desde varios hilos a la vez.
+    """
+
+    def __init__(self, limits: list[tuple[int, float]],
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.limits = limits
+        self._clock = clock
+        self._sleep = sleep
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+        self._longest = max(seconds for _, seconds in limits)
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = self._clock()
+                while self._calls and now - self._calls[0] >= self._longest:
+                    self._calls.popleft()
+
+                wait = 0.0
+                for max_calls, seconds in self.limits:
+                    recent = [t for t in self._calls if now - t < seconds]
+                    if len(recent) >= max_calls:
+                        # Hay que esperar a que la más antigua de las últimas `max_calls` salga.
+                        wait = max(wait, recent[-max_calls] + seconds - now)
+
+                if wait <= 0:
+                    self._calls.append(now)
+                    return
+            self._sleep(wait)  # fuera del lock, para no bloquear a los otros hilos
+
+
+# Límites de una clave de desarrollo, con un pequeño margen. Si un día tienes una
+# clave de producción, solo cambia estos números.
+_limiter = RateLimiter([(18, 1), (95, 120)])
+DOWNLOAD_WORKERS = 4
+
+
 def _retry_after(response: httpx.Response, attempt: int) -> float:
     try:
         return float(response.headers["Retry-After"])
@@ -42,6 +92,7 @@ def _retry_after(response: httpx.Response, attempt: int) -> float:
 def riot_get(url: str, params: dict | None = None):
     for attempt in range(1, MAX_RETRIES + 1):
         last_try = attempt == MAX_RETRIES
+        _limiter.acquire()
         try:
             response = _client.get(url, params=params)
         except httpx.TransportError as e:
@@ -89,6 +140,23 @@ def obtain_match_id(puuid: str, count: int = 10, queue: int = 420) -> list[str]:
 
 def obtain_match_data(match_id: str) -> dict:
     return riot_get(f"{base_url}/lol/match/v5/matches/{match_id}")
+
+
+def fetch_matches(match_ids: list[str]) -> Iterator[tuple[str, dict | None, RiotAPIError | None]]:
+    """Descarga varias partidas en paralelo y las entrega a medida que llegan.
+
+    Devuelve (match_id, datos, None) si salió bien o (match_id, None, error) si falló.
+    Es un generador: quien lo usa puede guardar cada partida y soltar el JSON
+    enseguida, sin tener las 100 partidas completas en memoria a la vez.
+    """
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+        futures = {pool.submit(obtain_match_data, match_id): match_id for match_id in match_ids}
+        for future in as_completed(futures):
+            match_id = futures[future]
+            try:
+                yield match_id, future.result(), None
+            except RiotAPIError as e:
+                yield match_id, None, e
 
 
 def obtain_rank(puuid: str, platform: str = "la1") -> list[dict]:

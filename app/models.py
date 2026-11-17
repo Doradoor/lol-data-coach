@@ -2,7 +2,8 @@ from pathlib import Path
 
 from sqlalchemy import BigInteger, Boolean, Column, Float, ForeignKey, Index, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.pool import NullPool
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool, StaticPool
 
 # Rutas absolutas: funcionan igual si ejecutas desde lol-coach/ o desde app/.
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -84,3 +85,20 @@ Base.metadata.create_all(engine)
 for _table in Base.metadata.sorted_tables:
     for _index in _table.indexes:
         _index.create(engine, checkfirst=True)
+
+
+def create_memory_engine() -> Engine:
+    """Base SQLite con las mismas tablas, pero que vive solo en la RAM.
+
+    Se usa para consultar a otro jugador sin guardar nada en disco. StaticPool hace que
+    todas las sesiones compartan la misma conexión (con NullPool, cada conexión nueva
+    vería una base vacía distinta). Al llamar a .dispose() la conexión se cierra y SQLite
+    libera la memoria.
+    """
+    memory_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},  # Streamlit ejecuta el script en otro hilo
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(memory_engine)
+    return memory_engine
