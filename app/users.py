@@ -1,35 +1,50 @@
 import logging
 import time
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from models import Rank, User, engine
+from models import Participant, Rank, User, engine
 from riot_client import obtain_puuid, obtain_rank
 
 log = logging.getLogger(__name__)
 
 
-def find_user(game_name: str, tagline: str) -> User | None:
+def find_user(game_name: str, tagline: str, db: Engine = engine) -> User | None:
     """Busca el usuario en la base local. Los Riot ID no distinguen mayúsculas."""
     name, tag = game_name.strip().casefold(), tagline.strip().casefold()
-    with Session(engine) as session:
+    with Session(db) as session:
         for user in session.scalars(select(User)):
             if user.game_name.casefold() == name and user.tagline.casefold() == tag:
                 return user
     return None
 
 
+def migrate_puuid(old: str, new: str, db: Engine = engine) -> None:
+    """Cambia el puuid de un jugador en todas las tablas.
+
+    Riot encripta los puuid de forma distinta para cada API key: al cambiar de clave,
+    el mismo jugador llega con otro puuid y el viejo deja de servir para consultar a Riot.
+    Sin esto, sus partidas viejas y nuevas quedarían separadas como si fueran de dos jugadores.
+    """
+    with Session(db) as session:
+        for model in (User, Rank, Participant):
+            session.execute(update(model).where(model.puuid == old).values(puuid=new))
+        session.commit()
+    log.info("puuid actualizado (cambió la API key): %s... → %s...", old[:8], new[:8])
+
+
 def register_user(game_name: str, tagline: str, platform: str = "la1", refresh_rank: bool = True) -> str:
     game_name, tagline = game_name.strip(), tagline.strip()
+
+    # Siempre se le pregunta a Riot (1 llamada): el puuid guardado puede ser de otra API key.
+    puuid = obtain_puuid(game_name, tagline)
     user = find_user(game_name, tagline)
 
-    if user:
-        puuid = user.puuid
-    else:
-        # Solo le pedimos el puuid a Riot si no conocemos al jugador.
-        puuid = obtain_puuid(game_name, tagline)
+    if user and user.puuid != puuid:
+        migrate_puuid(user.puuid, puuid)
+    elif user is None:
         with Session(engine) as session:
             if session.get(User, puuid) is None:
                 session.add(User(puuid=puuid, game_name=game_name, tagline=tagline, platform=platform))

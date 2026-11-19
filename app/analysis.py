@@ -1,10 +1,10 @@
 """Qué métricas separan victorias de derrotas en cada rol (regresión logística).
 
 Uso:
-    python analysis.py                      # métricas relativas a tu equipo
-    python analysis.py --vs-rival           # diferencia contra tu rival de línea (recomendado)
-    python analysis.py --sin-kda            # sin KDA, para ver mejor el peso del resto
-    python analysis.py --vs-rival --sin-kda
+    python analysis.py                  # diferencia contra tu rival de línea
+    python analysis.py --sin-kda        # lo mismo, sin KDA, para ver mejor el peso del resto
+    python analysis.py --equipo         # parte del total de tu equipo (para comparar: predice
+                                        # poco, porque esas partes siempre suman 100%)
 """
 import argparse
 
@@ -182,21 +182,29 @@ def analyze_role(df: pd.DataFrame, role: str, features: list[str], paired: bool)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--vs-rival", action="store_true", help="comparar contra el rival de línea")
-    parser.add_argument("--sin-kda", action="store_true", help="excluir el KDA de las métricas")
+    parser.add_argument("--equipo", action="store_true",
+                        help="usar la parte del total del equipo en vez de la diferencia contra el rival")
+    parser.add_argument("--vs-rival", action="store_true",
+                        help="(ya es el modo por defecto; se acepta para no romper comandos viejos)")
+    parser.add_argument("--sin-kda", action="store_true",
+                        help="excluir KDA y participación en kills, igual que el dashboard")
     args = parser.parse_args()
 
-    base = RIVAL_FEATURES if args.vs_rival else TEAM_FEATURES
+    paired = not args.equipo
+    base = RIVAL_FEATURES if paired else TEAM_FEATURES
+    # Igual que el dashboard: las dos métricas se calculan con kills/muertes y reflejan el resultado.
+    excluded = frozenset({"log_kda", "kill_participation"}) if args.sin_kda else frozenset()
+
     data = build_features(load_data())
-    if args.vs_rival:
+    if paired:
         data = vs_rival(data, base)
 
     print(f"Filas totales: {len(data)} | winrate base: {data['win'].mean():.0%}")
-    print(f"Modo: {'diferencia contra el rival de línea' if args.vs_rival else 'parte del total del equipo'}"
-          f"{' | sin KDA' if args.sin_kda else ''}")
+    print(f"Modo: {'diferencia contra el rival de línea' if paired else 'parte del total del equipo'}"
+          f"{' | sin KDA ni participación en kills' if args.sin_kda else ''}")
     # Coeficientes sobre datos estandarizados: +1.0 = subir esa métrica una desviación
     # estándar multiplica las probabilidades de ganar por ~2.7 (e^1), con el resto igual.
     print("Exactitud = % de partidas acertadas en datos que el modelo no vio (azar = 50%).")
     print("Coeficiente > 0: más de eso se asocia con ganar; < 0: con perder (con el resto igual).\n")
     for role in ROLES:
-        analyze_role(data, role, features_for(role, base, args.sin_kda), paired=args.vs_rival)
+        analyze_role(data, role, features_for(role, base, drop_kda=False, exclude=excluded), paired=paired)

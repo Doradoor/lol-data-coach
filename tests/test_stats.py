@@ -103,3 +103,19 @@ def test_find_rival():
     # Sin posición (remake, modos raros): no inventar un rival.
     no_role = SimpleNamespace(team_position="", team_id=100)
     assert find_rival(no_role, [no_role, SimpleNamespace(team_position="", team_id=200)]) is None
+
+
+def test_rival_stats_groups_by_rival_across_my_champions():
+    from stats import calculate_rival_stats
+    games = [
+        make_matchup("Ahri", "Zed", won=False),
+        make_matchup("Syndra", "Zed", won=False),  # otro campeón mío, mismo rival
+        make_matchup("Ahri", "Lux", won=True),
+        make_matchup("Ahri", "Lux", won=True),
+    ]
+    rivals = {r["rival_champion"]: r for r in calculate_rival_stats(games)}
+    assert rivals["Zed"]["total"] == 2 and rivals["Zed"]["wins"] == 0
+    # Winrate general 50%: contra Zed (0/2) queda por debajo, contra Lux (2/2) por encima.
+    assert rivals["Zed"]["vs_average"] < 0 < rivals["Lux"]["vs_average"]
+    # Ajuste bayesiano con k=10: (0 + 10·0.5) / (2 + 10) = 41.7% → 8.3 puntos bajo el 50%.
+    assert rivals["Zed"]["vs_average"] == pytest.approx(-8.3, abs=0.1)

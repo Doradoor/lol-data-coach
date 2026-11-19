@@ -9,8 +9,14 @@ from analysis import RIVAL_FEATURES, ROLES, build_features, features_for, fit_ro
 from coach import ask_coach, build_prompt
 from live import QUEUES, fetch_player_live, release
 from models import engine
-from riot_client import REGIONS, RiotNotFoundError
-from stats import calculate_champion_stats, calculate_stats, get_my_matchups, overall_winrate
+from riot_client import REGIONS, RiotNotFoundError, estimated_download_minutes
+from stats import (
+    calculate_champion_stats,
+    calculate_rival_stats,
+    calculate_stats,
+    get_my_matchups,
+    overall_winrate,
+)
 from sync_matches import sync_my_matches
 from users import get_current_rank, register_user
 
@@ -19,6 +25,10 @@ from users import get_current_rank, register_user
 OWNER_MODE = os.getenv("LOLCOACH_OWNER_MODE") == "1"
 # Preguntas al coach por sesión en la app pública, para no agotar la cuota de Gemini.
 MAX_COACH_QUESTIONS = int(os.getenv("COACH_MAX_QUESTIONS", "10"))
+# El límite de llamadas a Riot es compartido por todos los visitantes: en la app pública,
+# 100 partidas (~2 min) como máximo por búsqueda; en tu computador, hasta 1000.
+MAX_LIVE_MATCHES = 1000 if OWNER_MODE else 100
+MAX_OWNER_MATCHES = 1000
 
 st.set_page_config(page_title="LoL Coach", layout="wide")
 st.title("LoL Coach: tus stats, no el promedio")
@@ -141,7 +151,7 @@ if temporary:
     riot_id = c_id.text_input("Riot ID", placeholder="Nombre#TAG")
     region = c_region.selectbox("Región", list(REGIONS), index=list(REGIONS).index("LAN"))
     queue = c_queue.selectbox("Cola", list(QUEUES))
-    count = c_count.number_input("Partidas", 10, 100, 40, key="count_live",
+    count = c_count.number_input("Partidas", 10, MAX_LIVE_MATCHES, 40, key="count_live",
                                  help="Con menos de 25 partidas en un rol, el modelo de "
                                       "'¿Qué te hace ganar?' no alcanza a entrenarse para ese rol.")
     sync_first = False
@@ -149,7 +159,12 @@ else:
     riot_id = st.text_input("Riot ID", placeholder="Nombre#TAG")
     col_a, col_b = st.columns(2)
     sync_first = col_a.checkbox("Descargar partidas nuevas de Riot (solo baja las que no tienes)")
-    count = col_b.number_input("Cuántas partidas revisar", 1, 100, 100, key="count_db")
+    count = col_b.number_input("Cuántas partidas revisar", 1, MAX_OWNER_MATCHES, 100, key="count_db")
+
+minutes = estimated_download_minutes(int(count))
+if minutes >= 1 and (temporary or sync_first):
+    st.caption(f"Descargar {int(count)} partidas tarda unos {minutes:.0f} minutos por el límite de "
+               "llamadas de Riot" + ("" if temporary else ", si todas fueran nuevas") + ".")
 
 if st.button("Analizar"):
     parsed = parse_riot_id(riot_id)
@@ -171,11 +186,13 @@ if st.button("Analizar"):
                 puuid = player.puuid
             elif sync_first:
                 bar = st.progress(0.0, text="Buscando partidas...")
-                puuid = sync_my_matches(
+                result = sync_my_matches(
                     game_name, tagline, count=int(count),
                     progress=lambda i, n: bar.progress(i / n, text=f"Descargando partida {i}/{n}"),
                 )
                 bar.empty()
+                puuid = result.puuid
+                (st.success if result.saved else st.info)(result.summary())
                 # Hay partidas nuevas: el modelo debe reentrenarse con ellas.
                 load_analysis_data.clear()
                 fit_role_cached.clear()
@@ -280,20 +297,77 @@ with tab_trend:
 
 # ---------- Matchups ----------
 with tab_mu:
-    st.subheader("Mapa de calor de matchups")
-    mu = pd.DataFrame(calculate_stats(matchups))
-    min_mu = min_slider("Mínimo de partidas por matchup", int(mu["total"].max()), 1)
-    mu = mu[mu["total"] >= min_mu]
+    st.subheader("Rivales más fáciles y más difíciles")
 
-    if mu.empty:
-        st.info("Ningún matchup llega a ese mínimo. Baja el filtro.")
+    # Opción "Todos": agrupa por rival sin importar tu campeón, así cada barra junta más partidas.
+    ALL = "Todos mis campeones"
+    my_champs = [ALL] + sorted({m["my_champion"] for m in matchups},
+                               key=lambda c: -sum(m["my_champion"] == c for m in matchups))
+    f1, f2 = st.columns(2)
+    champ = f1.selectbox("Tu campeón", my_champs,
+                         format_func=lambda c: c if c == ALL else
+                         f"{c} ({sum(m['my_champion'] == c for m in matchups)} partidas)")
+    subset = matchups if champ == ALL else [m for m in matchups if m["my_champion"] == champ]
+
+    rivals = pd.DataFrame(calculate_rival_stats(subset))
+    max_games = int(rivals["total"].max())
+    with f2:
+        min_mu = min_slider("Mínimo de partidas contra el rival", max_games, 3 if champ == ALL else 1)
+    shown = rivals[rivals["total"] >= min_mu]
+
+    baseline = overall_winrate(subset) * 100
+    who = "en general" if champ == ALL else f"con {champ}"
+    st.caption(
+        f"Cada barra es cuántos puntos por encima o por debajo de tu winrate {who} "
+        f"({baseline:.0f}%) estás contra ese rival. Se usa el winrate ajustado: con pocas "
+        "partidas la barra se queda cerca de 0 a propósito, para no sacar conclusiones con 1 o 2."
+    )
+
+    if shown.empty:
+        st.info("Ningún rival llega a ese mínimo de partidas. Baja el filtro.")
     else:
-        pivot = mu.pivot_table(index="my_champion", columns="rival_champion", values="adjusted_winrate")
-        fig = px.imshow(
-            pivot, color_continuous_scale="RdYlGn", zmin=35, zmax=65,
-            aspect="auto", labels={"color": "Winrate ajustado %"},
+        # Con muchos rivales, mostrar solo los 6 mejores y los 6 peores.
+        N = 6
+        ordered = shown.sort_values("vs_average")
+        if len(ordered) > 2 * N:
+            ordered = pd.concat([ordered.head(N), ordered.tail(N)])
+        ordered = ordered.assign(
+            record=lambda d: d["wins"].astype(str) + "V " + (d["total"] - d["wins"]).astype(str) + "D",
+            real_wr=lambda d: (d["wins"] / d["total"] * 100).round(0),
+            resultado=lambda d: d["vs_average"].map(lambda v: "Te va mejor" if v >= 0 else "Te va peor"),
         )
+
+        fig = px.bar(
+            ordered, x="vs_average", y="rival_champion", orientation="h",
+            color="resultado", text="record",
+            color_discrete_map={"Te va mejor": "#2a9d8f", "Te va peor": "#e76f51"},
+            custom_data=["total", "real_wr", "adjusted_winrate"],
+            labels={"vs_average": f"Puntos vs. tu winrate {who}", "rival_champion": "", "resultado": ""},
+        )
+        fig.update_traces(
+            textposition="outside",
+            hovertemplate="<b>%{y}</b><br>%{customdata[0]} partidas · winrate real %{customdata[1]:.0f}%"
+                          "<br>winrate ajustado %{customdata[2]:.1f}%<extra></extra>",
+        )
+        fig.add_vline(x=0, line_width=1, opacity=0.5)
+        span = max(5, ordered["vs_average"].abs().max() * 1.3)  # espacio para el texto "5V 3D"
+        fig.update_layout(xaxis_range=[-span, span], height=max(300, 34 * len(ordered) + 80),
+                          legend=dict(orientation="h", y=1.08))
         st.plotly_chart(fig, width="stretch")
+
+    with st.expander("Ver el detalle de cada matchup (tu campeón vs. rival)"):
+        detail = pd.DataFrame(calculate_stats(subset)).sort_values(["total", "adjusted_winrate"],
+                                                                   ascending=[False, False])
+        st.dataframe(
+            detail[["my_champion", "rival_champion", "total", "wins", "adjusted_winrate",
+                    "avg_kda_text", "gold_vs_rival", "damage_vs_rival"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "my_champion": "Tu campeón", "rival_champion": "Rival", "total": "Partidas",
+                "wins": "Victorias", "adjusted_winrate": "Winrate ajustado %", "avg_kda_text": "KDA",
+                "gold_vs_rival": "Oro vs rival (x)", "damage_vs_rival": "Daño vs rival (x)",
+            },
+        )
 
 # ---------- ¿Qué te hace ganar? ----------
 with tab_win:
@@ -329,10 +403,12 @@ with tab_win:
                 "Descarga más partidas.")
     else:
         m1, m2 = st.columns(2)
-        m1.metric("Exactitud del modelo", f"{result['accuracy']:.0%}",
-                  f"± {result['accuracy_std']:.0%}", delta_color="off",
-                  help="% de partidas en las que el modelo acierta quién gana la línea, medido "
-                       "en partidas que no vio al entrenar. Adivinar al azar da 50%.")
+        # El ± va en el valor y no como `delta`: st.metric dibuja una flecha en el delta,
+        # y "↑ ± 9%" se leía como si la exactitud hubiera subido.
+        m1.metric("Exactitud del modelo", f"{result['accuracy']:.0%} ± {result['accuracy_std']:.0%}",
+                  help="% de partidas en las que el modelo acierta quién ganó, medido en partidas "
+                       "que no vio al entrenar. Adivinar al azar da 50%. El ± es cuánto varía "
+                       "entre los 5 grupos de la validación cruzada.")
         m2.metric("Filas usadas", result["rows"], help="2 por partida: tú y tu rival, o los dos "
                                                        "jugadores de ese rol en tus partidas.")
 

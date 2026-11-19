@@ -177,6 +177,26 @@ def calculate_champion_stats(matchups: list[dict]) -> list[dict]:
     ]
 
 
+def calculate_rival_stats(matchups: list[dict]) -> list[dict]:
+    """Stats por campeón rival, sin importar con qué campeón jugaste tú.
+
+    Junta más partidas por fila que calculate_stats (mi campeón × rival), así que sirve
+    para responder "¿contra quién me va bien o mal?" con algo más de evidencia.
+    `vs_average` = winrate ajustado − tu winrate general, en puntos porcentuales.
+    """
+    prior = overall_winrate(matchups)
+    grouped = group_by(matchups, lambda m: m["rival_champion"])
+    rows = []
+    for rival, s in grouped.items():
+        summary = summarize(s, prior)
+        rows.append({
+            "rival_champion": rival,
+            **summary,
+            "vs_average": round(summary["adjusted_winrate"] - prior * 100, 1),
+        })
+    return rows
+
+
 if __name__ == "__main__":
     from users import register_user
 

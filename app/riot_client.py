@@ -173,9 +173,30 @@ def obtain_puuid(game_name: str, tagline: str, routing: str = DEFAULT_ROUTING) -
         ) from None
 
 
+MATCH_IDS_PAGE = 100  # máximo que Riot devuelve por llamada
+
+
 def obtain_match_id(puuid: str, count: int = 10, queue: int = 420, routing: str = DEFAULT_ROUTING) -> list[str]:
+    """Ids de las últimas `count` partidas, de la más reciente a la más antigua.
+
+    Riot devuelve como máximo 100 por llamada, así que se pide por páginas con `start`
+    (0, 100, 200...) hasta juntar `count` o hasta que el jugador no tenga más partidas.
+    """
     url = f"{regional_url(routing)}/lol/match/v5/matches/by-puuid/{puuid}/ids"
-    return riot_get(url, params={"count": count, "queue": queue})
+    ids: list[str] = []
+    while len(ids) < count:
+        page_size = min(MATCH_IDS_PAGE, count - len(ids))
+        page = riot_get(url, params={"start": len(ids), "count": page_size, "queue": queue})
+        ids.extend(page)
+        if len(page) < page_size:  # no hay más partidas
+            break
+    return ids
+
+
+def estimated_download_minutes(matches: int) -> float:
+    """Minutos aproximados para descargar `matches` partidas con el límite de 2 minutos."""
+    max_calls, window = max(_limiter.limits, key=lambda limit: limit[1])
+    return max(0, matches - max_calls) / max_calls * window / 60
 
 
 def obtain_match_data(match_id: str) -> dict:
