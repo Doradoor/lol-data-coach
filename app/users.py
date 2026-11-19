@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 
 def find_user(game_name: str, tagline: str, db: Engine = engine) -> User | None:
-    """Busca el usuario en la base local. Los Riot ID no distinguen mayúsculas."""
+    """busca un usuario por riot id sin distinguir mayusculas."""
     name, tag = game_name.strip().casefold(), tagline.strip().casefold()
     with Session(db) as session:
         for user in session.scalars(select(User)):
@@ -22,12 +22,7 @@ def find_user(game_name: str, tagline: str, db: Engine = engine) -> User | None:
 
 
 def migrate_puuid(old: str, new: str, db: Engine = engine) -> None:
-    """Cambia el puuid de un jugador en todas las tablas.
-
-    Riot encripta los puuid de forma distinta para cada API key: al cambiar de clave,
-    el mismo jugador llega con otro puuid y el viejo deja de servir para consultar a Riot.
-    Sin esto, sus partidas viejas y nuevas quedarían separadas como si fueran de dos jugadores.
-    """
+    """cambia el puuid de un jugador en todas las tablas (riot lo cambia con cada api key)."""
     with Session(db) as session:
         for model in (User, Rank, Participant):
             session.execute(update(model).where(model.puuid == old).values(puuid=new))
@@ -36,9 +31,9 @@ def migrate_puuid(old: str, new: str, db: Engine = engine) -> None:
 
 
 def register_user(game_name: str, tagline: str, platform: str = "la1", refresh_rank: bool = True) -> str:
+    """registra al jugador si no existe y actualiza su puuid y su rank; devuelve el puuid."""
     game_name, tagline = game_name.strip(), tagline.strip()
 
-    # Siempre se le pregunta a Riot (1 llamada): el puuid guardado puede ser de otra API key.
     puuid = obtain_puuid(game_name, tagline)
     user = find_user(game_name, tagline)
 
@@ -57,6 +52,7 @@ def register_user(game_name: str, tagline: str, platform: str = "la1", refresh_r
 
 
 def get_current_rank(puuid: str, queue_type: str, db: Engine = engine) -> Rank | None:
+    """ultimo rank guardado del jugador en una cola."""
     with Session(db) as session:
         stmt = (
             select(Rank)
@@ -68,11 +64,12 @@ def get_current_rank(puuid: str, queue_type: str, db: Engine = engine) -> Rank |
 
 
 def save_current_rank(puuid: str, platform: str = "la1") -> None:
+    """consulta el rank actual del jugador en riot y lo guarda."""
     store_rank(puuid, obtain_rank(puuid, platform))
 
 
 def store_rank(puuid: str, rank_entries: list[dict], db: Engine = engine) -> None:
-    """Guarda en `db` las entradas de rank que devolvió Riot."""
+    """guarda en la base las entradas de rank que devolvio riot."""
     now = int(time.time())
 
     with Session(db) as session:

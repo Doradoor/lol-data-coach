@@ -5,7 +5,6 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool, StaticPool
 
-# Rutas absolutas: funcionan igual si ejecutas desde lol-coach/ o desde app/.
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "lol.db"
@@ -14,6 +13,7 @@ Base = declarative_base()
 
 
 class User(Base):
+    """jugador registrado en la base."""
     __tablename__ = "users"
 
     puuid = Column(String, primary_key=True)
@@ -23,6 +23,7 @@ class User(Base):
 
 
 class Rank(Base):
+    """rank de un jugador en una cola en un momento dado."""
     __tablename__ = "ranks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -37,17 +38,19 @@ class Rank(Base):
 
 
 class Match(Base):
+    """datos generales de una partida."""
     __tablename__ = "matches"
 
     match_id = Column(String, primary_key=True)
     game_version = Column(String)
-    game_duration = Column(Integer)  # segundos
-    game_creation = Column(BigInteger)  # epoch en milisegundos
+    game_duration = Column(Integer)
+    game_creation = Column(BigInteger)
     game_mode = Column(String)
     end_game_result = Column(String)
 
 
 class Participant(Base):
+    """estadisticas de un jugador en una partida."""
     __tablename__ = "participants"
     __table_args__ = (
         Index("ux_participants_match_puuid", "match_id", "puuid", unique=True),
@@ -69,7 +72,7 @@ class Participant(Base):
     heals_on_teammates = Column(Integer)
     vision_score = Column(Integer)
     cs = Column(Integer)
-    kill_participation = Column(Float)  # 0.0 - 1.0
+    kill_participation = Column(Float)
 
 
 DATA_DIR.mkdir(exist_ok=True)
@@ -81,23 +84,16 @@ engine = create_engine(
 )
 
 Base.metadata.create_all(engine)
-# create_all no agrega índices a tablas que ya existían, así que los creamos aparte.
 for _table in Base.metadata.sorted_tables:
     for _index in _table.indexes:
         _index.create(engine, checkfirst=True)
 
 
 def create_memory_engine() -> Engine:
-    """Base SQLite con las mismas tablas, pero que vive solo en la RAM.
-
-    Se usa para consultar a otro jugador sin guardar nada en disco. StaticPool hace que
-    todas las sesiones compartan la misma conexión (con NullPool, cada conexión nueva
-    vería una base vacía distinta). Al llamar a .dispose() la conexión se cierra y SQLite
-    libera la memoria.
-    """
+    """crea una base sqlite en memoria con las mismas tablas; se libera con dispose()."""
     memory_engine = create_engine(
         "sqlite://",
-        connect_args={"check_same_thread": False},  # Streamlit ejecuta el script en otro hilo
+        connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     Base.metadata.create_all(memory_engine)

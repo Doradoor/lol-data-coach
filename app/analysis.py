@@ -1,10 +1,9 @@
-"""Qué métricas separan victorias de derrotas en cada rol (regresión logística).
+"""que metricas separan victorias de derrotas en cada rol (regresion logistica).
 
-Uso:
-    python analysis.py                  # diferencia contra tu rival de línea
-    python analysis.py --sin-kda        # lo mismo, sin KDA, para ver mejor el peso del resto
-    python analysis.py --equipo         # parte del total de tu equipo (para comparar: predice
-                                        # poco, porque esas partes siempre suman 100%)
+uso:
+    python analysis.py             diferencia contra tu rival de linea
+    python analysis.py --sin-kda   lo mismo, sin kda ni participacion en kills
+    python analysis.py --equipo    parte del total de tu equipo (predice poco)
 """
 import argparse
 
@@ -22,9 +21,6 @@ from stats import MIN_GAME_SECONDS
 
 ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
-# Modo equipo: qué parte del total de tu equipo aportas.
-# Ojo: dentro de un equipo estas partes siempre suman 100%, ganes o pierdas, así que
-# miden cómo se reparte el equipo, no si le va bien. Por eso predicen poco por sí solas.
 TEAM_FEATURES = [
     "log_kda",
     "damage_share",
@@ -35,9 +31,6 @@ TEAM_FEATURES = [
     "kill_participation",
 ]
 
-# Modo vs rival: tu valor menos el de tu rival de línea, en la misma partida.
-# Se usan valores por minuto en vez de partes del equipo, porque los dos jugadores
-# están en equipos distintos.
 RIVAL_FEATURES = [
     "log_kda",
     "damage_per_min",
@@ -48,11 +41,7 @@ RIVAL_FEATURES = [
     "kill_participation",
 ]
 
-# gold_share / oro se deja fuera a propósito: el oro es más consecuencia de ganar que causa,
-# y casi predice el resultado por sí solo, tapando a las demás métricas.
-# El KDA tiene un poco el mismo problema; con --sin-kda se puede comparar.
 
-# Fuera de Support, curar a aliados es casi siempre 0 (93-97% de las filas): no aporta nada.
 HEAL_FEATURES = {"heal_share", "heal_per_min"}
 HEAL_ROLES = {"UTILITY"}
 
@@ -60,10 +49,7 @@ MIN_ROWS = 50
 
 
 def load_data(db: Engine = engine) -> pd.DataFrame:
-    """Trae a los 10 jugadores de cada partida válida de Grieta del Invocador.
-
-    Usa el mismo filtro que stats.py, para que los dos análisis vean las mismas partidas.
-    """
+    """trae a los 10 jugadores de cada partida valida de la base db."""
     query = text("""
         SELECT p.*, m.game_duration
         FROM participants p
@@ -76,19 +62,17 @@ def load_data(db: Engine = engine) -> pd.DataFrame:
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Convierte las stats crudas en métricas comparables entre partidas."""
+    """calcula las metricas por jugador: partes del equipo, valores por minuto y log del kda."""
     df = df.copy()
     team = df.groupby(["match_id", "team_id"])
     minutes = df["game_duration"] / 60
 
     def share(col: str) -> pd.Series:
-        # Si el equipo entero suma 0 (por ejemplo, nadie curó), la parte de cada uno es 0, no NaN.
+        """parte del total del equipo para una columna (0 si el equipo suma 0)."""
         team_sum = team[col].transform("sum")
         return (df[col] / team_sum.replace(0, np.nan)).fillna(0)
 
     kda = (df["kills"] + df["assists"]) / df["deaths"].clip(lower=1)
-    # El KDA está muy sesgado (mediana ~2.4, máximo 30+): con log, unas pocas
-    # partidas extremas ya no dominan el coeficiente.
     df["log_kda"] = np.log1p(kda)
 
     df["damage_share"] = share("damage_dealt")
@@ -108,11 +92,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def vs_rival(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    """Reemplaza cada métrica por (yo − mi rival de línea).
-
-    En cada partida y rol hay exactamente 2 jugadores, uno por equipo, así que
-    el valor del rival es (suma de los dos − el mío).
-    """
+    """reemplaza cada metrica por la diferencia contra el rival de linea de la misma partida."""
     pairs = df.groupby(["match_id", "team_position"])
     valid = (pairs["win"].transform("size") == 2) & (pairs["win"].transform("sum") == 1)
     df = df[valid & (df["team_position"] != "")].copy()
@@ -124,7 +104,7 @@ def vs_rival(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
 
 
 def features_for(role: str, base: list[str], drop_kda: bool, exclude: frozenset[str] = frozenset()) -> list[str]:
-    """Métricas a usar para un rol: sin curación fuera de Support y sin las excluidas."""
+    """devuelve las metricas a usar en un rol (curacion solo en support, sin las excluidas)."""
     return [
         f for f in base
         if not (drop_kda and f == "log_kda")
@@ -134,23 +114,13 @@ def features_for(role: str, base: list[str], drop_kda: bool, exclude: frozenset[
 
 
 def fit_role(df: pd.DataFrame, role: str, features: list[str], paired: bool = False) -> dict | None:
-    """Entrena una regresión logística para un rol y devuelve sus resultados.
-
-    Devuelve None si el rol no tiene al menos MIN_ROWS filas. Si no, un dict con:
-      rows          filas usadas
-      accuracy      exactitud media en validación cruzada (0-1)
-      accuracy_std  desviación de la exactitud entre los 5 grupos
-      coefs         {métrica: coeficiente}, en el orden de `features`
-    """
+    """entrena la regresion logistica de un rol y devuelve filas, exactitud y coeficientes (none si hay pocas filas)."""
     d = df[df["team_position"] == role].dropna(subset=features)
     if len(d) < MIN_ROWS:
         return None
 
-    # En modo vs rival los datos son simétricos (cada fila tiene su espejo con el signo
-    # cambiado y el resultado opuesto), así que el intercepto no tiene sentido.
     model = make_pipeline(StandardScaler(), LogisticRegression(fit_intercept=not paired))
 
-    # GroupKFold: las filas de una misma partida nunca se separan entre entrenamiento y prueba
     cv = GroupKFold(n_splits=5)
     scores = cross_val_score(model, d[features], d["win"], cv=cv, groups=d["match_id"])
 
@@ -166,7 +136,7 @@ def fit_role(df: pd.DataFrame, role: str, features: list[str], paired: bool = Fa
 
 
 def analyze_role(df: pd.DataFrame, role: str, features: list[str], paired: bool) -> None:
-    """Entrena el modelo de un rol e imprime qué métricas pesan más."""
+    """entrena el modelo de un rol e imprime su exactitud y sus coeficientes."""
     result = fit_role(df, role, features, paired)
     if result is None:
         rows = len(df[df["team_position"] == role].dropna(subset=features))
@@ -192,7 +162,6 @@ if __name__ == "__main__":
 
     paired = not args.equipo
     base = RIVAL_FEATURES if paired else TEAM_FEATURES
-    # Igual que el dashboard: las dos métricas se calculan con kills/muertes y reflejan el resultado.
     excluded = frozenset({"log_kda", "kill_participation"}) if args.sin_kda else frozenset()
 
     data = build_features(load_data())
@@ -202,8 +171,6 @@ if __name__ == "__main__":
     print(f"Filas totales: {len(data)} | winrate base: {data['win'].mean():.0%}")
     print(f"Modo: {'diferencia contra el rival de línea' if paired else 'parte del total del equipo'}"
           f"{' | sin KDA ni participación en kills' if args.sin_kda else ''}")
-    # Coeficientes sobre datos estandarizados: +1.0 = subir esa métrica una desviación
-    # estándar multiplica las probabilidades de ganar por ~2.7 (e^1), con el resto igual.
     print("Exactitud = % de partidas acertadas en datos que el modelo no vio (azar = 50%).")
     print("Coeficiente > 0: más de eso se asocia con ganar; < 0: con perder (con el resto igual).\n")
     for role in ROLES:

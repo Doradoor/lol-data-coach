@@ -1,9 +1,4 @@
-"""Consulta temporal: descarga y analiza a un jugador sin guardar nada en disco.
-
-Las partidas se guardan en una base SQLite en memoria (models.create_memory_engine),
-así que stats.py, analysis.py y coach.py funcionan igual que con data/lol.db, solo
-cambiando el parámetro `db`. Al llamar a release() la base se cierra y la memoria se libera.
-"""
+"""consulta temporal: descarga y analiza a un jugador en una base en memoria, sin guardar nada en disco."""
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,17 +18,19 @@ QUEUES = {"SoloQ": 420, "Flex": 440}
 
 @dataclass
 class LivePlayer:
+    """jugador consultado de forma temporal y su base en memoria."""
     puuid: str
     game_name: str
     tagline: str
-    region: str         # p. ej. "LAN", "EUW"
-    queue: str          # "SoloQ" o "Flex"
-    db: Engine          # base en memoria con sus partidas y su rank
-    downloaded: int     # partidas descargadas bien
-    failed: int         # partidas que Riot no devolvió
+    region: str
+    queue: str
+    db: Engine
+    downloaded: int
+    failed: int
 
     @property
     def riot_id(self) -> str:
+        """devuelve el riot id como nombre#tag."""
         return f"{self.game_name}#{self.tagline}"
 
 
@@ -45,7 +42,7 @@ def fetch_player_live(
     queue: str = "SoloQ",
     progress: Callable[[int, int], None] | None = None,
 ) -> LivePlayer:
-    """Descarga rank y últimas `count` partidas de la cola elegida a una base en memoria."""
+    """descarga el rank y las ultimas partidas del jugador a una base en memoria."""
     game_name, tagline = game_name.strip(), tagline.strip()
     platform, routing = REGIONS[region]
     puuid = obtain_puuid(game_name, tagline, routing=routing)
@@ -64,13 +61,12 @@ def fetch_player_live(
                 log.warning("Salté %s: %s", match_id, error)
                 failed += 1
             else:
-                # Se guardan solo las 10 filas que usamos; el JSON completo (~100 KB) se descarta.
                 save_match(data, db)
                 downloaded += 1
             if progress:
                 progress(i, len(match_ids))
     except BaseException:
-        db.dispose()  # si algo falla a mitad, no dejar la base en memoria colgando
+        db.dispose()
         raise
 
     log.info("Consulta temporal de %s#%s: %d partidas (%d fallidas)", game_name, tagline, downloaded, failed)
@@ -78,6 +74,6 @@ def fetch_player_live(
 
 
 def release(player: LivePlayer) -> None:
-    """Cierra la base en memoria: SQLite libera todo lo que tenía."""
+    """cierra la base en memoria del jugador y libera sus datos."""
     player.db.dispose()
     log.info("Liberados los datos temporales de %s", player.riot_id)

@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 log = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-# Siempre cargar el .env del repo (lol-coach/.env), no importa desde qué carpeta ejecutes.
 _env_path = ROOT_DIR / ".env"
 load_dotenv(_env_path)
 
@@ -28,8 +27,6 @@ if not API_KEY:
 
 MAX_RETRIES = 4
 
-# Cada región tiene su servidor ("platform", para rank) y su grupo regional
-# ("routing", para cuentas y partidas). Ejemplo: EUW → euw1 + europe.
 REGIONS: dict[str, tuple[str, str]] = {
     "LAN": ("la1", "americas"),
     "LAS": ("la2", "americas"),
@@ -54,36 +51,31 @@ _client = httpx.Client(headers={"X-Riot-Token": API_KEY}, timeout=15)
 
 
 class RiotAPIError(RuntimeError):
-    """Error de la API de Riot con un mensaje legible para mostrar al usuario."""
+    """error de la api de riot con un mensaje para mostrar al usuario."""
 
 
 class RiotNotFoundError(RiotAPIError):
-    """Riot respondió 404: el jugador o la partida no existe."""
+    """riot respondio 404: el jugador o la partida no existe."""
 
 
 def regional_url(routing: str) -> str:
+    """devuelve la url base de la api para un grupo regional."""
     return f"https://{routing}.api.riotgames.com"
 
 
 def routing_for_match(match_id: str) -> str:
-    """El id de la partida empieza con su servidor (p. ej. 'EUW1_123' → europe)."""
+    """deduce el grupo regional a partir del prefijo del id de la partida."""
     platform = match_id.split("_", 1)[0].lower()
     return _ROUTING_BY_PLATFORM.get(platform, DEFAULT_ROUTING)
 
 
 class RateLimiter:
-    """Limita las llamadas con ventanas deslizantes, p. ej. [(20, 1), (100, 120)] =
-    máximo 20 llamadas en cualquier segundo y 100 en cualquier ventana de 2 minutos.
-
-    Antes de cada llamada se ejecuta acquire(): si alguna ventana está llena, espera
-    justo lo necesario hasta que salga la llamada más antigua. Así no se esperan
-    1.2 s fijos entre llamadas: las primeras van de inmediato. Es seguro usarlo
-    desde varios hilos a la vez.
-    """
+    """limita las llamadas a riot con ventanas deslizantes; es seguro entre hilos."""
 
     def __init__(self, limits: list[tuple[int, float]],
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep):
+        """recibe los limites como [(llamadas, segundos), ...]."""
         self.limits = limits
         self._clock = clock
         self._sleep = sleep
@@ -92,6 +84,7 @@ class RateLimiter:
         self._longest = max(seconds for _, seconds in limits)
 
     def acquire(self) -> None:
+        """espera lo justo para no pasar ningun limite y registra la llamada."""
         while True:
             with self._lock:
                 now = self._clock()
@@ -102,22 +95,20 @@ class RateLimiter:
                 for max_calls, seconds in self.limits:
                     recent = [t for t in self._calls if now - t < seconds]
                     if len(recent) >= max_calls:
-                        # Hay que esperar a que la más antigua de las últimas `max_calls` salga.
                         wait = max(wait, recent[-max_calls] + seconds - now)
 
                 if wait <= 0:
                     self._calls.append(now)
                     return
-            self._sleep(wait)  # fuera del lock, para no bloquear a los otros hilos
+            self._sleep(wait)
 
 
-# Límites de una clave de desarrollo, con un pequeño margen. Si un día tienes una
-# clave de producción, solo cambia estos números.
 _limiter = RateLimiter([(18, 1), (95, 120)])
 DOWNLOAD_WORKERS = 4
 
 
 def _retry_after(response: httpx.Response, attempt: int) -> float:
+    """segundos a esperar segun el header retry-after, o backoff exponencial si no viene."""
     try:
         return float(response.headers["Retry-After"])
     except (KeyError, ValueError):
@@ -125,6 +116,7 @@ def _retry_after(response: httpx.Response, attempt: int) -> float:
 
 
 def riot_get(url: str, params: dict | None = None):
+    """hace un get a riot con limite de llamadas, reintentos y errores legibles."""
     for attempt in range(1, MAX_RETRIES + 1):
         last_try = attempt == MAX_RETRIES
         _limiter.acquire()
@@ -139,7 +131,6 @@ def riot_get(url: str, params: dict | None = None):
 
         status = response.status_code
 
-        # Errores temporales (límite de llamadas o caída de Riot): esperar y reintentar.
         if status == 429 or status >= 500:
             if last_try:
                 raise RiotAPIError(f"Riot respondió {status} después de {MAX_RETRIES} intentos: {response.text}")
@@ -164,6 +155,7 @@ def riot_get(url: str, params: dict | None = None):
 
 
 def obtain_puuid(game_name: str, tagline: str, routing: str = DEFAULT_ROUTING) -> str:
+    """devuelve el puuid de un riot id."""
     url = f"{regional_url(routing)}/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tagline)}"
     try:
         return riot_get(url)["puuid"]
@@ -173,43 +165,35 @@ def obtain_puuid(game_name: str, tagline: str, routing: str = DEFAULT_ROUTING) -
         ) from None
 
 
-MATCH_IDS_PAGE = 100  # máximo que Riot devuelve por llamada
+MATCH_IDS_PAGE = 100
 
 
 def obtain_match_id(puuid: str, count: int = 10, queue: int = 420, routing: str = DEFAULT_ROUTING) -> list[str]:
-    """Ids de las últimas `count` partidas, de la más reciente a la más antigua.
-
-    Riot devuelve como máximo 100 por llamada, así que se pide por páginas con `start`
-    (0, 100, 200...) hasta juntar `count` o hasta que el jugador no tenga más partidas.
-    """
+    """devuelve los ids de las ultimas partidas, pidiendo paginas de 100."""
     url = f"{regional_url(routing)}/lol/match/v5/matches/by-puuid/{puuid}/ids"
     ids: list[str] = []
     while len(ids) < count:
         page_size = min(MATCH_IDS_PAGE, count - len(ids))
         page = riot_get(url, params={"start": len(ids), "count": page_size, "queue": queue})
         ids.extend(page)
-        if len(page) < page_size:  # no hay más partidas
+        if len(page) < page_size:
             break
     return ids
 
 
 def estimated_download_minutes(matches: int) -> float:
-    """Minutos aproximados para descargar `matches` partidas con el límite de 2 minutos."""
+    """minutos aproximados para descargar esa cantidad de partidas."""
     max_calls, window = max(_limiter.limits, key=lambda limit: limit[1])
     return max(0, matches - max_calls) / max_calls * window / 60
 
 
 def obtain_match_data(match_id: str) -> dict:
+    """descarga el detalle de una partida desde su region."""
     return riot_get(f"{regional_url(routing_for_match(match_id))}/lol/match/v5/matches/{match_id}")
 
 
 def fetch_matches(match_ids: list[str]) -> Iterator[tuple[str, dict | None, RiotAPIError | None]]:
-    """Descarga varias partidas en paralelo y las entrega a medida que llegan.
-
-    Devuelve (match_id, datos, None) si salió bien o (match_id, None, error) si falló.
-    Es un generador: quien lo usa puede guardar cada partida y soltar el JSON
-    enseguida, sin tener las 100 partidas completas en memoria a la vez.
-    """
+    """descarga partidas en paralelo y las entrega a medida que llegan."""
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
         futures = {pool.submit(obtain_match_data, match_id): match_id for match_id in match_ids}
         for future in as_completed(futures):
@@ -221,7 +205,7 @@ def fetch_matches(match_ids: list[str]) -> Iterator[tuple[str, dict | None, Riot
 
 
 def obtain_rank(puuid: str, platform: str = "la1") -> list[dict]:
-    """Entradas de rank del jugador. Lista vacía si no tiene rank en ese servidor."""
+    """devuelve las entradas de rank del jugador (lista vacia si no tiene)."""
     try:
         return riot_get(f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}")
     except RiotNotFoundError:
@@ -229,6 +213,7 @@ def obtain_rank(puuid: str, platform: str = "la1") -> list[dict]:
 
 
 def save_json(data: dict, path: Path) -> None:
+    """guarda un diccionario como archivo json."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
 

@@ -11,14 +11,16 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class SyncResult:
+    """resumen de una sincronizacion de partidas."""
     puuid: str
-    requested: int   # cuántas partidas se pidieron
-    found: int       # cuántas tiene Riot en el historial (puede ser menos de las pedidas)
-    already: int     # cuántas ya estaban guardadas
-    saved: int       # cuántas nuevas se guardaron
-    failed: int      # cuántas no se pudieron descargar
+    requested: int
+    found: int
+    already: int
+    saved: int
+    failed: int
 
     def summary(self) -> str:
+        """texto para mostrarle al usuario que paso en la sincronizacion."""
         if self.found == 0:
             return "Riot no tiene partidas de esta cola en tu historial."
         history = (f"Riot tiene {self.found} partidas en tu historial"
@@ -37,17 +39,15 @@ def sync_my_matches(
     count: int = 20,
     progress: Callable[[int, int], None] | None = None,
 ) -> SyncResult:
-    """Descarga las partidas nuevas del jugador y las GUARDA en data/lol.db."""
+    """descarga las partidas nuevas del jugador y las guarda en la base en disco."""
     puuid = register_user(game_name, tagline)
     match_ids = obtain_match_id(puuid, count=count)
 
-    # No descargar las que ya tenemos.
     already = existing_match_ids(match_ids)
     pending = [m for m in match_ids if m not in already]
     log.info("%d partidas encontradas, %d ya guardadas, %d por descargar",
              len(match_ids), len(already), len(pending))
 
-    # El ritmo de las llamadas lo controla el RateLimiter de riot_client.
     saved = failed = 0
     for i, (match_id, data, error) in enumerate(fetch_matches(pending), start=1):
         if error:

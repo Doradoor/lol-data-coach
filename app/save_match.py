@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 
 def existing_match_ids(match_ids: list[str], db: Engine = engine) -> set[str]:
-    """Devuelve cuáles de estos match_id ya están en la base (una sola consulta)."""
+    """devuelve cuales de esos ids ya estan guardados en la base."""
     if not match_ids:
         return set()
     with Session(db) as session:
@@ -20,7 +20,7 @@ def existing_match_ids(match_ids: list[str], db: Engine = engine) -> set[str]:
 
 
 def save_match(data: dict, db: Engine = engine) -> bool:
-    """Guarda la partida en `db` (por defecto, data/lol.db). Devuelve False si ya existía."""
+    """guarda la partida y sus 10 jugadores; devuelve false si ya existia."""
     info = data["info"]
     match_id = data["metadata"]["matchId"]
 

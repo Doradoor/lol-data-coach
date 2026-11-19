@@ -15,28 +15,32 @@ METRICS = [
     "heals_on_teammates", "kill_participation", "cs_per_min",
 ]
 
-MIN_GAME_SECONDS = 300  # menos de 5 min = remake
+MIN_GAME_SECONDS = 300
 
 
 def safe_div(a: float | None, b: float | None) -> float | None:
+    """divide a entre b; devuelve none si falta un dato o b es 0."""
     return a / b if a is not None and b else None
 
 
 def avg(values: list) -> float | None:
+    """promedio redondeado ignorando los valores none."""
     clean = [v for v in values if v is not None]
     return round(sum(clean) / len(clean), 2) if clean else None
 
 
 def kda_ratio(kills: int, deaths: int, assists: int) -> float:
+    """kda como (kills + asistencias) / muertes, contando al menos 1 muerte."""
     return (kills + assists) / max(deaths, 1)
 
 
 def bayesian_rating(wins: int, total: int, global_winrate: float = 0.5, k: int = 10) -> float:
-    """Winrate 'suavizado': con pocas partidas se acerca a global_winrate, con muchas al real."""
+    """winrate suavizado hacia global_winrate cuando hay pocas partidas."""
     return (wins + k * global_winrate) / (total + k)
 
 
 def find_rival(me: Participant, match_players: list[Participant]) -> Participant | None:
+    """busca al rival de linea dentro de los jugadores de la partida."""
     if not me.team_position:
         return None
     return next(
@@ -47,11 +51,7 @@ def find_rival(me: Participant, match_players: list[Participant]) -> Participant
 
 
 def get_my_matchups(puuid: str, db: Engine = engine) -> list[dict]:
-    """Una fila por partida válida, ordenadas de la más antigua a la más reciente.
-
-    `db` es la base de donde leer: data/lol.db por defecto, o una base en memoria
-    (models.create_memory_engine) para consultas temporales.
-    """
+    """una fila por partida valida del jugador con sus metricas contra el rival."""
     matchups = []
 
     with Session(db) as session:
@@ -68,8 +68,6 @@ def get_my_matchups(puuid: str, db: Engine = engine) -> list[dict]:
         my_rows = session.execute(stmt).all()
         log.debug("Partidas encontradas (CLASSIC): %d", len(my_rows))
 
-        # Cargar a los 10 jugadores de todas mis partidas en UNA consulta,
-        # en vez de 3 consultas por partida.
         match_ids = [me.match_id for me, _ in my_rows]
         players_by_match: dict[str, list[Participant]] = defaultdict(list)
         if match_ids:
@@ -112,15 +110,17 @@ def get_my_matchups(puuid: str, db: Engine = engine) -> list[dict]:
 
 
 def overall_winrate(matchups: list[dict]) -> float:
-    """Winrate general del jugador; 50% si todavía no hay partidas."""
+    """winrate general del jugador (0.5 si no hay partidas)."""
     return safe_div(sum(m["won"] for m in matchups), len(matchups)) or 0.5
 
 
 def main_roles(matchups: list[dict]) -> list[tuple[str, int]]:
+    """roles jugados, ordenados por cantidad de partidas."""
     return Counter(m["role"] for m in matchups).most_common()
 
 
 def group_by(matchups: list[dict], key_fn) -> dict:
+    """agrupa los matchups y acumula victorias, kda y metricas por llave."""
     grouped = defaultdict(lambda: {
         "wins": 0, "total": 0, "kills": 0, "deaths": 0, "assists": 0,
         **{m: [] for m in METRICS},
@@ -141,6 +141,7 @@ def group_by(matchups: list[dict], key_fn) -> dict:
 
 
 def summarize(s: dict, prior: float = 0.5) -> dict:
+    """resume un grupo: partidas, winrate ajustado, kda y promedio de cada metrica."""
     n = s["total"]
     result = {
         "wins": s["wins"],
@@ -155,11 +156,7 @@ def summarize(s: dict, prior: float = 0.5) -> dict:
 
 
 def calculate_stats(matchups: list[dict]) -> list[dict]:
-    """Stats por matchup (mi campeón vs rival de línea).
-
-    El winrate ajustado parte de TU winrate general, no de 50%: así un campeón
-    con pocas partidas se compara contra tu nivel real.
-    """
+    """stats por matchup (tu campeon contra el rival)."""
     prior = overall_winrate(matchups)
     grouped = group_by(matchups, lambda m: (m["my_champion"], m["rival_champion"]))
     return [
@@ -169,6 +166,7 @@ def calculate_stats(matchups: list[dict]) -> list[dict]:
 
 
 def calculate_champion_stats(matchups: list[dict]) -> list[dict]:
+    """stats por campeon propio."""
     prior = overall_winrate(matchups)
     grouped = group_by(matchups, lambda m: m["my_champion"])
     return [
@@ -178,12 +176,7 @@ def calculate_champion_stats(matchups: list[dict]) -> list[dict]:
 
 
 def calculate_rival_stats(matchups: list[dict]) -> list[dict]:
-    """Stats por campeón rival, sin importar con qué campeón jugaste tú.
-
-    Junta más partidas por fila que calculate_stats (mi campeón × rival), así que sirve
-    para responder "¿contra quién me va bien o mal?" con algo más de evidencia.
-    `vs_average` = winrate ajustado − tu winrate general, en puntos porcentuales.
-    """
+    """stats por campeon rival y diferencia contra tu winrate general."""
     prior = overall_winrate(matchups)
     grouped = group_by(matchups, lambda m: m["rival_champion"])
     rows = []

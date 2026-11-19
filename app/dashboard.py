@@ -20,13 +20,8 @@ from stats import (
 from sync_matches import sync_my_matches
 from users import get_current_rank, register_user
 
-# Modo dueño: solo en tu computador (LOLCOACH_OWNER_MODE=1 en .env). Permite guardar tus
-# partidas en data/lol.db. En la app pública queda apagado: nadie escribe en la base.
 OWNER_MODE = os.getenv("LOLCOACH_OWNER_MODE") == "1"
-# Preguntas al coach por sesión en la app pública, para no agotar la cuota de Gemini.
 MAX_COACH_QUESTIONS = int(os.getenv("COACH_MAX_QUESTIONS", "10"))
-# El límite de llamadas a Riot es compartido por todos los visitantes: en la app pública,
-# 100 partidas (~2 min) como máximo por búsqueda; en tu computador, hasta 1000.
 MAX_LIVE_MATCHES = 1000 if OWNER_MODE else 100
 MAX_OWNER_MATCHES = 1000
 
@@ -60,50 +55,40 @@ METRIC_LABELS = {
     "cs_per_min": "CS / min",
     "kill_participation": "Participación en kills",
 }
-# Métricas que se calculan con kills/muertes: casi siempre reflejan el resultado
-# en vez de explicarlo, así que por defecto se excluyen del modelo del dashboard.
 OUTCOME_LIKE = frozenset({"log_kda", "kill_participation"})
 
 
-# ---------- Datos cacheados ----------
 @st.cache_data(show_spinner=False)
 def load_matchups(puuid: str) -> list[dict]:
-    """Streamlit vuelve a ejecutar todo el script con cada interacción: esto evita recalcular."""
+    """matchups del jugador desde la base en disco, cacheados."""
     return get_my_matchups(puuid)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_analysis_data() -> pd.DataFrame:
-    """Los 10 jugadores de cada partida guardada, con las métricas de analysis.py."""
+    """datos del analisis desde la base en disco, cacheados por 10 minutos."""
     return build_features(load_data())
 
 
 @st.cache_data(ttl=600, show_spinner="Entrenando el modelo...")
 def fit_role_cached(role: str, features: tuple[str, ...]) -> dict | None:
-    """Modelo 'vs rival' de un rol. `features` es tuple porque la llave del caché debe ser inmutable.
-
-    No recibe el DataFrame como argumento: así Streamlit no tiene que calcular el hash
-    de todos los datos en cada interacción, solo el de (role, features).
-    """
+    """entrena el modelo vs rival de un rol con los datos en disco, cacheado por rol y metricas."""
     paired = vs_rival(load_analysis_data(), list(features))
     return fit_role(paired, role, list(features), paired=True)
 
 
-# ---------- Consulta temporal ----------
-# Los datos de una consulta temporal se guardan en st.session_state["live"], NO en
-# st.cache_data: el caché es compartido por todos los que abren la app y dura hasta
-# su TTL; session_state es de esta pestaña del navegador y se borra con ella.
 def start_live(player) -> None:
+    """guarda en la sesion los datos de una consulta temporal ya descargada."""
     st.session_state["live"] = {
         "player": player,
         "matchups": get_my_matchups(player.puuid, player.db),
         "analysis": build_features(load_data(player.db)),
-        "fits": {},  # modelos ya entrenados, por (rol, features)
+        "fits": {},
     }
 
 
 def release_live() -> None:
-    """Libera la consulta temporal y olvida a ese jugador (su puuid, su Riot ID y el chat)."""
+    """libera la consulta temporal y olvida al jugador, su riot id y el chat."""
     live = st.session_state.pop("live", None)
     if live:
         release(live["player"])
@@ -112,6 +97,7 @@ def release_live() -> None:
 
 
 def fit_for(role: str, features: tuple[str, ...]) -> dict | None:
+    """devuelve el modelo de un rol, desde la consulta temporal o desde la base en disco."""
     live = st.session_state.get("live")
     if live is None:
         return fit_role_cached(role, features)
@@ -121,8 +107,8 @@ def fit_for(role: str, features: tuple[str, ...]) -> dict | None:
     return live["fits"][(role, features)]
 
 
-# ---------- Utilidades ----------
 def parse_riot_id(text: str) -> tuple[str, str] | None:
+    """separa un riot id nombre#tag en sus dos partes (none si falta el tag)."""
     name, sep, tag = text.strip().partition("#")
     if not sep or not name.strip() or not tag.strip():
         return None
@@ -130,13 +116,12 @@ def parse_riot_id(text: str) -> tuple[str, str] | None:
 
 
 def min_slider(label: str, max_value: int, default: int) -> int:
-    # st.slider falla si min == max, así que con 1 partida no mostramos el slider.
+    """slider de minimo de partidas; devuelve 1 si no hay rango para mostrarlo."""
     if max_value <= 1:
         return 1
     return st.slider(label, 1, max_value, min(default, max_value))
 
 
-# ---------- Entrada ----------
 TEMPORARY = "Consulta temporal (no se guarda)"
 if OWNER_MODE:
     mode = st.radio("Modo", ["Mi cuenta (se guarda en la base)", TEMPORARY], horizontal=True,
@@ -144,7 +129,7 @@ if OWNER_MODE:
                          "borra al liberar, al buscar a otro jugador o al cerrar la pestaña.")
     temporary = mode == TEMPORARY
 else:
-    temporary = True  # app pública: siempre consulta temporal
+    temporary = True
 
 if temporary:
     c_id, c_region, c_queue, c_count = st.columns([3, 1, 1, 1])
@@ -173,7 +158,6 @@ if st.button("Analizar"):
     else:
         game_name, tagline = parsed
         try:
-            # Una búsqueda nueva siempre suelta la consulta temporal anterior.
             release_live()
             if temporary:
                 bar = st.progress(0.0, text="Buscando jugador...")
@@ -193,7 +177,6 @@ if st.button("Analizar"):
                 bar.empty()
                 puuid = result.puuid
                 (st.success if result.saved else st.info)(result.summary())
-                # Hay partidas nuevas: el modelo debe reentrenarse con ellas.
                 load_analysis_data.clear()
                 fit_role_cached.clear()
                 load_matchups.clear()
@@ -202,7 +185,6 @@ if st.button("Analizar"):
                     puuid = register_user(game_name, tagline)
                 load_matchups.clear()
 
-            # Si cambió el jugador, empezar un chat nuevo.
             if st.session_state.get("puuid") != puuid:
                 st.session_state["chat"] = []
             st.session_state["puuid"] = puuid
@@ -216,10 +198,8 @@ if "puuid" not in st.session_state:
     st.info("Escribe un Riot ID (por ejemplo **Faker#KR1**), elige la región y aprieta **Analizar**.")
     st.stop()
 
-# ---------- Resumen ----------
 puuid = st.session_state["puuid"]
 live = st.session_state.get("live")
-# Toda la página lee de `db`: la base en disco, o la base en memoria de la consulta temporal.
 db = live["player"].db if live else engine
 matchups = live["matchups"] if live else load_matchups(puuid)
 
@@ -260,7 +240,6 @@ tab_champs, tab_trend, tab_mu, tab_win, tab_coach = st.tabs(
     ["Campeones", "Tendencia", "Matchups", "¿Qué te hace ganar?", "Coach"]
 )
 
-# ---------- Campeones ----------
 with tab_champs:
     st.subheader("Rendimiento por campeón")
     min_games = min_slider("Mínimo de partidas por campeón", int(champs["total"].max()), 3)
@@ -273,7 +252,6 @@ with tab_champs:
     )
     st.bar_chart(view.set_index("my_champion")["adjusted_winrate"])
 
-# ---------- Tendencia ----------
 with tab_trend:
     games = pd.DataFrame(matchups)
     games["fecha"] = pd.to_datetime(games["game_creation"], unit="ms")
@@ -295,11 +273,9 @@ with tab_trend:
         width="stretch",
     )
 
-# ---------- Matchups ----------
 with tab_mu:
     st.subheader("Rivales más fáciles y más difíciles")
 
-    # Opción "Todos": agrupa por rival sin importar tu campeón, así cada barra junta más partidas.
     ALL = "Todos mis campeones"
     my_champs = [ALL] + sorted({m["my_champion"] for m in matchups},
                                key=lambda c: -sum(m["my_champion"] == c for m in matchups))
@@ -326,7 +302,6 @@ with tab_mu:
     if shown.empty:
         st.info("Ningún rival llega a ese mínimo de partidas. Baja el filtro.")
     else:
-        # Con muchos rivales, mostrar solo los 6 mejores y los 6 peores.
         N = 6
         ordered = shown.sort_values("vs_average")
         if len(ordered) > 2 * N:
@@ -350,7 +325,7 @@ with tab_mu:
                           "<br>winrate ajustado %{customdata[2]:.1f}%<extra></extra>",
         )
         fig.add_vline(x=0, line_width=1, opacity=0.5)
-        span = max(5, ordered["vs_average"].abs().max() * 1.3)  # espacio para el texto "5V 3D"
+        span = max(5, ordered["vs_average"].abs().max() * 1.3)
         fig.update_layout(xaxis_range=[-span, span], height=max(300, 34 * len(ordered) + 80),
                           legend=dict(orientation="h", y=1.08))
         st.plotly_chart(fig, width="stretch")
@@ -369,7 +344,6 @@ with tab_mu:
             },
         )
 
-# ---------- ¿Qué te hace ganar? ----------
 with tab_win:
     st.subheader("¿Qué te hace ganar?")
     st.caption(
@@ -403,8 +377,6 @@ with tab_win:
                 "Descarga más partidas.")
     else:
         m1, m2 = st.columns(2)
-        # El ± va en el valor y no como `delta`: st.metric dibuja una flecha en el delta,
-        # y "↑ ± 9%" se leía como si la exactitud hubiera subido.
         m1.metric("Exactitud del modelo", f"{result['accuracy']:.0%} ± {result['accuracy_std']:.0%}",
                   help="% de partidas en las que el modelo acierta quién ganó, medido en partidas "
                        "que no vio al entrenar. Adivinar al azar da 50%. El ± es cuánto varía "
@@ -417,7 +389,7 @@ with tab_win:
             .assign(abs=lambda d: d["coef"].abs(),
                     label=lambda d: d["metric"].map(METRIC_LABELS),
                     efecto=lambda d: d["coef"].map(lambda c: "Más → ganar" if c > 0 else "Más → perder"))
-            .sort_values("abs")  # en barras horizontales, lo último queda arriba
+            .sort_values("abs")
         )
         fig = px.bar(
             coefs, x="coef", y="label", orientation="h", color="efecto",
@@ -433,8 +405,6 @@ with tab_win:
             st.info(f"No tienes partidas de {ROLE_LABELS[role]}: el modelo de arriba es de los "
                     "otros jugadores, pero no hay con qué compararte.")
         else:
-            # Ganadores = los OTROS jugadores que ganaron en ese rol. Si te incluyera,
-            # tus propias victorias empujarían el promedio hacia ti.
             winners = data[(data["team_position"] == role) & (data["win"] == 1) & (data["puuid"] != puuid)]
             table = pd.DataFrame({
                 "Métrica": [METRIC_LABELS[f] for f in features],
@@ -453,7 +423,6 @@ with tab_win:
             st.caption(f"Tus {len(mine_role)} partidas de {ROLE_LABELS[role]} contra {len(winners)} "
                        "victorias de otros jugadores en ese rol, en las mismas partidas que tú.")
 
-# ---------- Coach ----------
 with tab_coach:
     st.subheader("Pregúntale al coach")
     chat = st.session_state.setdefault("chat", [])
@@ -462,7 +431,6 @@ with tab_coach:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    # El contador no se reinicia al buscar a otro jugador: es por sesión del navegador.
     asked = st.session_state.setdefault("coach_questions", 0)
     limit_reached = not OWNER_MODE and asked >= MAX_COACH_QUESTIONS
     if limit_reached:

@@ -1,9 +1,4 @@
-"""Resumen rápido de UNA partida guardada como JSON (sin pasar por la base de datos).
-
-Uso:
-    python analyze_match.py                      # data/match_data.json, primer usuario registrado
-    python analyze_match.py ruta.json <puuid>
-"""
+"""resumen rapido de una partida guardada como json, sin usar la base de datos."""
 import json
 import sys
 from pathlib import Path
@@ -12,11 +7,12 @@ from models import DATA_DIR
 
 
 def find_player(players: list[dict], puuid: str) -> dict | None:
+    """busca al jugador por puuid dentro de los participantes."""
     return next((p for p in players if p["puuid"] == puuid), None)
 
 
 def find_rival(players: list[dict], me: dict) -> dict | None:
-    # Sin posición (remake, ARAM...) no hay rival de línea: no inventar uno.
+    """busca al rival de linea del jugador (none si no tiene posicion)."""
     if not me["teamPosition"]:
         return None
     return next(
@@ -27,10 +23,12 @@ def find_rival(players: list[dict], me: dict) -> dict | None:
 
 
 def kda_text(p: dict) -> str:
+    """devuelve el kda como texto k/d/a."""
     return f"{p['kills']}/{p['deaths']}/{p['assists']}"
 
 
 def analyze_match(route: Path, puuid: str) -> None:
+    """imprime el resumen del jugador y de su rival en una partida json."""
     match = json.loads(Path(route).read_text(encoding="utf-8"))
     info = match["info"]
     players = info["participants"]
@@ -62,6 +60,7 @@ def analyze_match(route: Path, puuid: str) -> None:
 
 
 def default_puuid() -> str:
+    """devuelve el puuid del primer usuario registrado en la base."""
     from sqlalchemy import select
     from sqlalchemy.orm import Session
 

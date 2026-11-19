@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 load_dotenv(ROOT_DIR / ".env")
 
 MODEL = "gemini-3.8-flash"
-MAX_HISTORY_MESSAGES = 8  # últimos mensajes del chat que se le mandan al coach
+MAX_HISTORY_MESSAGES = 8
 RECENT_GAMES = 10
 
 ROLE_NAMES = {"TOP": "Top", "JUNGLE": "Jungla", "MIDDLE": "Mid", "BOTTOM": "ADC", "UTILITY": "Support"}
@@ -26,7 +26,7 @@ _client: genai.Client | None = None
 
 
 def get_client() -> genai.Client:
-    """Crea el cliente al primer uso, así importar este módulo no falla si falta la clave."""
+    """crea el cliente de gemini la primera vez que se usa."""
     global _client
     if _client is None:
         api_key = os.getenv("GEMINI_API_KEY")
@@ -37,10 +37,12 @@ def get_client() -> genai.Client:
 
 
 def fmt(v, suffix: str = "") -> str:
+    """formatea un valor o devuelve n/d si no hay dato."""
     return "n/d" if v is None else f"{v}{suffix}"
 
 
 def pct(v) -> str:
+    """formatea una proporcion como porcentaje o devuelve n/d."""
     return "n/d" if v is None else f"{v * 100:.0f}%"
 
 
@@ -51,6 +53,7 @@ def build_prompt(
     matchups: list[dict] | None = None,
     db: Engine = engine,
 ) -> str:
+    """arma el contexto con las stats del jugador que se le manda al coach."""
     if matchups is None:
         matchups = get_my_matchups(puuid, db)
 
@@ -98,7 +101,7 @@ def build_prompt(
 
 
 def ask_coach(context: str, question: str, history: list[dict] | None = None, retries: int = 3) -> str:
-    """history: mensajes previos del chat [{"role": "user"|"assistant", "content": str}]."""
+    """le pregunta a gemini con el contexto y el historial del chat, con reintentos."""
     conversation = ""
     if history:
         turns = [
