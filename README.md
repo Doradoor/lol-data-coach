@@ -81,19 +81,6 @@ python -m pytest tests               # tests
 python app/analysis.py --vs-rival    # análisis por terminal (modo dueño, con data/lol.db)
 ```
 
-## Publicar (Streamlit Community Cloud)
-
-1. Sube el repositorio a GitHub.
-2. En [share.streamlit.io](https://share.streamlit.io) crea una app con el archivo principal
-   `app/dashboard.py`.
-3. En *Advanced settings → Secrets* pega:
-   ```toml
-   RIOT_API_KEY = "..."
-   GEMINI_API_KEY = "..."
-   ```
-4. Para una app pública, pide una **Personal API Key** en developer.riotgames.com
-   (registrando el proyecto). La clave de desarrollo caduca cada 24 horas.
-
 ## Estructura
 
 | Archivo | Qué hace |
