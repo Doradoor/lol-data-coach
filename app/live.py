@@ -12,11 +12,13 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models import User, create_memory_engine
-from riot_client import fetch_matches, obtain_match_id, obtain_puuid, obtain_rank
+from riot_client import REGIONS, fetch_matches, obtain_match_id, obtain_puuid, obtain_rank
 from save_match import save_match
 from users import store_rank
 
 log = logging.getLogger(__name__)
+
+QUEUES = {"SoloQ": 420, "Flex": 440}
 
 
 @dataclass
@@ -24,6 +26,8 @@ class LivePlayer:
     puuid: str
     game_name: str
     tagline: str
+    region: str         # p. ej. "LAN", "EUW"
+    queue: str          # "SoloQ" o "Flex"
     db: Engine          # base en memoria con sus partidas y su rank
     downloaded: int     # partidas descargadas bien
     failed: int         # partidas que Riot no devolvió
@@ -37,12 +41,14 @@ def fetch_player_live(
     game_name: str,
     tagline: str,
     count: int = 40,
-    platform: str = "la1",
+    region: str = "LAN",
+    queue: str = "SoloQ",
     progress: Callable[[int, int], None] | None = None,
 ) -> LivePlayer:
-    """Descarga rank y últimas `count` partidas de SoloQ del jugador a una base en memoria."""
+    """Descarga rank y últimas `count` partidas de la cola elegida a una base en memoria."""
     game_name, tagline = game_name.strip(), tagline.strip()
-    puuid = obtain_puuid(game_name, tagline)
+    platform, routing = REGIONS[region]
+    puuid = obtain_puuid(game_name, tagline, routing=routing)
 
     db = create_memory_engine()
     try:
@@ -51,7 +57,7 @@ def fetch_player_live(
             session.commit()
         store_rank(puuid, obtain_rank(puuid, platform), db)
 
-        match_ids = obtain_match_id(puuid, count=count)
+        match_ids = obtain_match_id(puuid, count=count, queue=QUEUES[queue], routing=routing)
         downloaded = failed = 0
         for i, (match_id, data, error) in enumerate(fetch_matches(match_ids), start=1):
             if error:
@@ -68,7 +74,7 @@ def fetch_player_live(
         raise
 
     log.info("Consulta temporal de %s#%s: %d partidas (%d fallidas)", game_name, tagline, downloaded, failed)
-    return LivePlayer(puuid, game_name, tagline, db, downloaded, failed)
+    return LivePlayer(puuid, game_name, tagline, region, queue, db, downloaded, failed)
 
 
 def release(player: LivePlayer) -> None:

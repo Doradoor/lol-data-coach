@@ -112,19 +112,35 @@ def fake_riot(monkeypatch):
             else:
                 yield match_id, matches[match_id], None
 
-    monkeypatch.setattr(live, "obtain_puuid", lambda name, tag: ME)
-    monkeypatch.setattr(live, "obtain_rank", lambda puuid, platform: [{
-        "queueType": "RANKED_SOLO_5x5", "tier": "GOLD", "rank": "II",
-        "leaguePoints": 40, "wins": 10, "losses": 8,
-    }])
-    monkeypatch.setattr(live, "obtain_match_id", lambda puuid, count: list(matches)[:count] + ["LA1_ROTA"])
+    calls = {}
+
+    def fake_puuid(name, tag, routing):
+        calls["puuid_routing"] = routing
+        return ME
+
+    def fake_rank(puuid, platform):
+        calls["rank_platform"] = platform
+        return [{"queueType": "RANKED_SOLO_5x5", "tier": "GOLD", "rank": "II",
+                 "leaguePoints": 40, "wins": 10, "losses": 8}]
+
+    def fake_match_ids(puuid, count, queue, routing):
+        calls["queue"], calls["ids_routing"] = queue, routing
+        return list(matches)[:count] + ["LA1_ROTA"]
+
+    monkeypatch.setattr(live, "obtain_puuid", fake_puuid)
+    monkeypatch.setattr(live, "obtain_rank", fake_rank)
+    monkeypatch.setattr(live, "obtain_match_id", fake_match_ids)
     monkeypatch.setattr(live, "fetch_matches", fake_fetch)
+    return calls
 
 
 def test_fetch_player_live_end_to_end(fake_riot):
     progress = []
     player = live.fetch_player_live("Amigo", "LAN", count=30, progress=lambda i, n: progress.append((i, n)))
 
+    assert (player.region, player.queue) == ("LAN", "SoloQ")
+    assert fake_riot == {"puuid_routing": "americas", "rank_platform": "la1",
+                         "queue": 420, "ids_routing": "americas"}
     assert (player.downloaded, player.failed) == (30, 1)
     assert progress[-1] == (31, 31)
 
@@ -155,3 +171,25 @@ def test_fetch_player_live_releases_db_on_error(fake_riot, monkeypatch):
     with pytest.raises(OperationalError):  # la base quedó liberada
         with created[0].connect() as conn:
             conn.execute(text("SELECT count(*) FROM users"))
+
+
+def test_fetch_player_live_uses_selected_region_and_queue(fake_riot):
+    player = live.fetch_player_live("Amigo", "EUW", count=5, region="EUW", queue="Flex")
+    assert fake_riot == {"puuid_routing": "europe", "rank_platform": "euw1",
+                         "queue": 440, "ids_routing": "europe"}
+    live.release(player)
+
+
+# ---------- Regiones ----------
+def test_routing_for_match_uses_match_prefix():
+    from riot_client import routing_for_match
+    assert routing_for_match("LA1_123") == "americas"
+    assert routing_for_match("EUW1_123") == "europe"
+    assert routing_for_match("KR_123") == "asia"
+    assert routing_for_match("OC1_123") == "sea"
+    assert routing_for_match("RARO_1") == "americas"  # desconocido: el valor por defecto
+
+
+def test_every_region_has_known_routing():
+    from riot_client import REGIONS
+    assert {routing for _, routing in REGIONS.values()} == {"americas", "europe", "asia", "sea"}

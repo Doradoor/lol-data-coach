@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar tests
+        # Los tests no llaman a Riot ni a Gemini (las llamadas están simuladas), pero
+        # riot_client.py exige que la clave exista al importarse: basta con una falsa.
+        env:
+          RIOT_API_KEY: ci-dummy-key
+        run: python -m pytest -q tests

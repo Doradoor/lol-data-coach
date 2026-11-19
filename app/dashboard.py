@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -5,14 +7,38 @@ from google.genai import errors
 
 from analysis import RIVAL_FEATURES, ROLES, build_features, features_for, fit_role, load_data, vs_rival
 from coach import ask_coach, build_prompt
-from live import fetch_player_live, release
+from live import QUEUES, fetch_player_live, release
 from models import engine
+from riot_client import REGIONS, RiotNotFoundError
 from stats import calculate_champion_stats, calculate_stats, get_my_matchups, overall_winrate
 from sync_matches import sync_my_matches
 from users import get_current_rank, register_user
 
+# Modo dueño: solo en tu computador (LOLCOACH_OWNER_MODE=1 en .env). Permite guardar tus
+# partidas en data/lol.db. En la app pública queda apagado: nadie escribe en la base.
+OWNER_MODE = os.getenv("LOLCOACH_OWNER_MODE") == "1"
+# Preguntas al coach por sesión en la app pública, para no agotar la cuota de Gemini.
+MAX_COACH_QUESTIONS = int(os.getenv("COACH_MAX_QUESTIONS", "10"))
+
 st.set_page_config(page_title="LoL Coach", layout="wide")
 st.title("LoL Coach: tus stats, no el promedio")
+
+with st.sidebar:
+    st.markdown(
+        "### Cómo funciona\n"
+        "1. Escribe tu Riot ID y elige tu región.\n"
+        "2. Se descargan tus últimas partidas desde la API de Riot.\n"
+        "3. Ves tu rendimiento por campeón, tus matchups, tu tendencia y qué diferencias "
+        "contra tu rival de línea van asociadas con ganar en cada rol.\n\n"
+        "Tus partidas se analizan **solo en memoria**: no se guardan y se borran al buscar a "
+        "otro jugador, al apretar *Liberar datos* o al cerrar la pestaña."
+    )
+    st.caption(
+        "LoL Coach isn't endorsed by Riot Games and doesn't reflect the views or opinions of "
+        "Riot Games or anyone officially involved in producing or managing Riot Games properties. "
+        "Riot Games, and all associated properties are trademarks or registered trademarks of "
+        "Riot Games, Inc."
+    )
 
 ROLE_LABELS = {"TOP": "Top", "JUNGLE": "Jungla", "MIDDLE": "Mid", "BOTTOM": "ADC", "UTILITY": "Support"}
 METRIC_LABELS = {
@@ -102,19 +128,26 @@ def min_slider(label: str, max_value: int, default: int) -> int:
 
 # ---------- Entrada ----------
 TEMPORARY = "Consulta temporal (no se guarda)"
-mode = st.radio("Modo", ["Mi cuenta (se guarda en la base)", TEMPORARY], horizontal=True,
-                help="La consulta temporal descarga las partidas, las analiza en memoria y las "
-                     "borra al liberar, al buscar a otro jugador o al cerrar la pestaña.")
-temporary = mode == TEMPORARY
-
-riot_id = st.text_input("Riot ID", placeholder="Nombre#TAG")
-col_a, col_b = st.columns(2)
-if temporary:
-    sync_first = False
-    col_a.caption("Se descargan las últimas partidas de SoloQ. Con menos de 25 partidas "
-                  "en un rol, el modelo de '¿Qué te hace ganar?' no alcanza a entrenarse.")
-    count = col_b.number_input("Cuántas partidas descargar", 10, 100, 40, key="count_live")
+if OWNER_MODE:
+    mode = st.radio("Modo", ["Mi cuenta (se guarda en la base)", TEMPORARY], horizontal=True,
+                    help="La consulta temporal descarga las partidas, las analiza en memoria y las "
+                         "borra al liberar, al buscar a otro jugador o al cerrar la pestaña.")
+    temporary = mode == TEMPORARY
 else:
+    temporary = True  # app pública: siempre consulta temporal
+
+if temporary:
+    c_id, c_region, c_queue, c_count = st.columns([3, 1, 1, 1])
+    riot_id = c_id.text_input("Riot ID", placeholder="Nombre#TAG")
+    region = c_region.selectbox("Región", list(REGIONS), index=list(REGIONS).index("LAN"))
+    queue = c_queue.selectbox("Cola", list(QUEUES))
+    count = c_count.number_input("Partidas", 10, 100, 40, key="count_live",
+                                 help="Con menos de 25 partidas en un rol, el modelo de "
+                                      "'¿Qué te hace ganar?' no alcanza a entrenarse para ese rol.")
+    sync_first = False
+else:
+    riot_id = st.text_input("Riot ID", placeholder="Nombre#TAG")
+    col_a, col_b = st.columns(2)
     sync_first = col_a.checkbox("Descargar partidas nuevas de Riot (solo baja las que no tienes)")
     count = col_b.number_input("Cuántas partidas revisar", 1, 100, 100, key="count_db")
 
@@ -130,7 +163,7 @@ if st.button("Analizar"):
             if temporary:
                 bar = st.progress(0.0, text="Buscando jugador...")
                 player = fetch_player_live(
-                    game_name, tagline, count=int(count),
+                    game_name, tagline, count=int(count), region=region, queue=queue,
                     progress=lambda i, n: bar.progress(i / n, text=f"Descargando partida {i}/{n}"),
                 )
                 bar.empty()
@@ -157,10 +190,13 @@ if st.button("Analizar"):
                 st.session_state["chat"] = []
             st.session_state["puuid"] = puuid
             st.session_state["riot_id"] = f"{game_name}#{tagline}"
+        except RiotNotFoundError as e:
+            st.warning(str(e))
         except RuntimeError as e:
             st.error(str(e))
 
 if "puuid" not in st.session_state:
+    st.info("Escribe un Riot ID (por ejemplo **Faker#KR1**), elige la región y aprieta **Analizar**.")
     st.stop()
 
 # ---------- Resumen ----------
@@ -175,9 +211,9 @@ if live:
     p = live["player"]
     info_col, button_col = st.columns([4, 1])
     info_col.info(
-        f"Consulta temporal: {p.downloaded} partidas en memoria"
+        f"{p.region} · {p.queue}: {p.downloaded} partidas analizadas en memoria"
         f"{f' ({p.failed} no se pudieron descargar)' if p.failed else ''}. "
-        "No se guardó nada en la base de datos."
+        "No se guardó nada."
     )
     if button_col.button("Liberar datos", type="primary", width="stretch"):
         release_live()
@@ -193,7 +229,14 @@ if matchups:
 
 champs = pd.DataFrame(calculate_champion_stats(matchups))
 if champs.empty:
-    st.warning("No hay partidas CLASSIC guardadas. Marca 'Descargar partidas'.")
+    if live:
+        p = live["player"]
+        st.warning(
+            f"No encontramos partidas completas de {p.queue} en {p.region} para {p.riot_id}. "
+            "Revisa que la región sea la correcta o prueba con la otra cola."
+        )
+    else:
+        st.warning("No hay partidas CLASSIC guardadas. Marca 'Descargar partidas'.")
     st.stop()
 
 tab_champs, tab_trend, tab_mu, tab_win, tab_coach = st.tabs(
@@ -343,8 +386,16 @@ with tab_coach:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    question = st.chat_input("¿Cómo juego la línea, qué campeón elijo...?")
+    # El contador no se reinicia al buscar a otro jugador: es por sesión del navegador.
+    asked = st.session_state.setdefault("coach_questions", 0)
+    limit_reached = not OWNER_MODE and asked >= MAX_COACH_QUESTIONS
+    if limit_reached:
+        st.info(f"Llegaste al máximo de {MAX_COACH_QUESTIONS} preguntas por sesión.")
+        question = None
+    else:
+        question = st.chat_input("¿Cómo juego la línea, qué campeón elijo...?")
     if question:
+        st.session_state["coach_questions"] += 1
         with st.chat_message("user"):
             st.write(question)
 

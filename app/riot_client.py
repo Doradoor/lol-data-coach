@@ -26,14 +26,49 @@ if not API_KEY:
         "(get a key at https://developer.riotgames.com — dev keys expire every 24h)."
     )
 
-base_url = "https://americas.api.riotgames.com"
 MAX_RETRIES = 4
+
+# Cada región tiene su servidor ("platform", para rank) y su grupo regional
+# ("routing", para cuentas y partidas). Ejemplo: EUW → euw1 + europe.
+REGIONS: dict[str, tuple[str, str]] = {
+    "LAN": ("la1", "americas"),
+    "LAS": ("la2", "americas"),
+    "NA": ("na1", "americas"),
+    "BR": ("br1", "americas"),
+    "EUW": ("euw1", "europe"),
+    "EUNE": ("eun1", "europe"),
+    "TR": ("tr1", "europe"),
+    "RU": ("ru", "europe"),
+    "ME": ("me1", "europe"),
+    "KR": ("kr", "asia"),
+    "JP": ("jp1", "asia"),
+    "OCE": ("oc1", "sea"),
+    "SEA": ("sg2", "sea"),
+    "TW": ("tw2", "sea"),
+    "VN": ("vn2", "sea"),
+}
+_ROUTING_BY_PLATFORM = {platform: routing for platform, routing in REGIONS.values()}
+DEFAULT_ROUTING = "americas"
 
 _client = httpx.Client(headers={"X-Riot-Token": API_KEY}, timeout=15)
 
 
 class RiotAPIError(RuntimeError):
     """Error de la API de Riot con un mensaje legible para mostrar al usuario."""
+
+
+class RiotNotFoundError(RiotAPIError):
+    """Riot respondió 404: el jugador o la partida no existe."""
+
+
+def regional_url(routing: str) -> str:
+    return f"https://{routing}.api.riotgames.com"
+
+
+def routing_for_match(match_id: str) -> str:
+    """El id de la partida empieza con su servidor (p. ej. 'EUW1_123' → europe)."""
+    platform = match_id.split("_", 1)[0].lower()
+    return _ROUTING_BY_PLATFORM.get(platform, DEFAULT_ROUTING)
 
 
 class RateLimiter:
@@ -119,7 +154,7 @@ def riot_get(url: str, params: dict | None = None):
                 "desarrollo caducan cada 24h (genera una nueva en developer.riotgames.com)."
             )
         if status == 404:
-            raise RiotAPIError(f"No encontrado: {url}")
+            raise RiotNotFoundError(f"No encontrado: {url}")
         if status >= 400:
             raise RiotAPIError(f"Error {status}: {response.text}")
 
@@ -128,18 +163,23 @@ def riot_get(url: str, params: dict | None = None):
     raise AssertionError("unreachable")
 
 
-def obtain_puuid(game_name: str, tagline: str) -> str:
-    url = f"{base_url}/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tagline)}"
-    return riot_get(url)["puuid"]
+def obtain_puuid(game_name: str, tagline: str, routing: str = DEFAULT_ROUTING) -> str:
+    url = f"{regional_url(routing)}/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tagline)}"
+    try:
+        return riot_get(url)["puuid"]
+    except RiotNotFoundError:
+        raise RiotNotFoundError(
+            f"No encontramos a {game_name}#{tagline}. Revisa que el nombre y el tag estén bien escritos."
+        ) from None
 
 
-def obtain_match_id(puuid: str, count: int = 10, queue: int = 420) -> list[str]:
-    url = f"{base_url}/lol/match/v5/matches/by-puuid/{puuid}/ids"
+def obtain_match_id(puuid: str, count: int = 10, queue: int = 420, routing: str = DEFAULT_ROUTING) -> list[str]:
+    url = f"{regional_url(routing)}/lol/match/v5/matches/by-puuid/{puuid}/ids"
     return riot_get(url, params={"count": count, "queue": queue})
 
 
 def obtain_match_data(match_id: str) -> dict:
-    return riot_get(f"{base_url}/lol/match/v5/matches/{match_id}")
+    return riot_get(f"{regional_url(routing_for_match(match_id))}/lol/match/v5/matches/{match_id}")
 
 
 def fetch_matches(match_ids: list[str]) -> Iterator[tuple[str, dict | None, RiotAPIError | None]]:
@@ -160,7 +200,11 @@ def fetch_matches(match_ids: list[str]) -> Iterator[tuple[str, dict | None, Riot
 
 
 def obtain_rank(puuid: str, platform: str = "la1") -> list[dict]:
-    return riot_get(f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}")
+    """Entradas de rank del jugador. Lista vacía si no tiene rank en ese servidor."""
+    try:
+        return riot_get(f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}")
+    except RiotNotFoundError:
+        return []
 
 
 def save_json(data: dict, path: Path) -> None:
